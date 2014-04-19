@@ -15,6 +15,10 @@ implementation
 
 uses xquery, simplehtmltreeparser, bbutils, xquery_json;
 
+procedure equal(const s1, s2, testname: string);
+begin
+  if s1 <> s2 then raise exception.Create(s1 + ' <> ' + s2 + ' ('+testname+')');
+end;
 
 procedure unittests(TestErrors:boolean);
 var
@@ -599,6 +603,12 @@ begin
   f('xs:decimal("")', 'err:FORG0001');
   f('xs:decimal()', 'err:XPST0017');
   f('xs:string()', 'err:XPST0017');
+
+
+  //strange tests
+  t('(xs:int(4) + xs:int(2)) instance of xs:int', 'false');
+  t('abs(xs:byte(0)) instance of xs:byte', 'false');
+  t('ceiling(xs:unsignedInt(0)) instance of xs:unsignedInt', 'false'); //zorba returns true, but spec says " If the type of $arg is a type derived from one of the numeric types, the result is an instance of the base numeric type."
 
 
   t('type-of(xs:decimal("6.5"))', 'decimal', '');
@@ -2049,23 +2059,33 @@ begin
   t('(object(("x", "y")), object(("u", "v")))[2].u', 'v', '');
 
   t('obj := {"b": {"c": {"d": 1}}}', '');
+  t('serialize-json($obj)', '{"b": {"c": {"d": 1}}}');
   t('$obj.b.c.d', '1');
   t('x := $obj', '');
+  t('serialize-json($x)', '{"b": {"c": {"d": 1}}}');
   t('$x.b.c.d := 2', '2');
   t('$x.b.c.d', '2');
   t('$obj.b.c.d', '1');
+  t('serialize-json($obj)', '{"b": {"c": {"d": 1}}}');
+  t('serialize-json($x)', '{"b": {"c": {"d": 2}}}');
   t('x.b.c.d := 3', '3');
+  t('serialize-json($x)', '{"b": {"c": {"d": 3}}}');
   t('$x.b.c.d', '3');
   t('$obj.b.c.d', '1');
   t('$x.b("c").d := 4', '4');
   t('$x.b.c.d', '4');
+  t('serialize-json($x)', '{"b": {"c": {"d": 4}}}');
   t('$x("b")("c")("d") := 5', '5');
   t('$x.b.c.d', '5');
+  t('serialize-json($x)', '{"b": {"c": {"d": 5}}}');
   t('$x("b")("c").d := 6', '6');
   t('$x.b.c.d', '6');
+  t('serialize-json($x)', '{"b": {"c": {"d": 6}}}');
   t('$x("b").c := {"y": 123}', '');
   t('$x.b.c.d', '');
   t('$x.b.c.y', '123');
+  t('serialize-json($x)', '{"b": {"c": {"y": 123}}}');
+
 
   t('string-join(for $i in object(("a", "x", "b", "Y", "c", "Z")).a return $i, "|")', 'x', '');
   t('string-join(for $i in object(("a", "x", "b", "Y", "c", "Z")) return $i.a, "|")', 'x', '');
@@ -2149,6 +2169,85 @@ begin
   t('$x .foo', 'bar');
 
   t('serialize-json({$indirect: $x.$indirect})', '{"foo": "bar"}');
+
+  t('($x).foo := "mouse"', 'mouse');
+  t('($x).foo', 'mouse');
+  t('($x)("foo") := "mice"', 'mice');
+  t('($x)("foo")', 'mice');
+  t('($x)(("foo")) := "more mice"', 'more mice');
+  t('($x)(("foo"))', 'more mice');
+
+  // []:= operator
+  t('($x).foo []:= "tap"', 'tap');
+  t('join(($x).foo)', 'more mice tap');
+  t('($x).foo [] := "top"', 'top');
+  t('join(($x).foo)', 'more mice tap top');
+  t('$optest [] := 1', '1');
+  t('join($optest)', '1');
+  t('$optest [] := 2', '2');
+  t('join($optest)', '1 2');
+  t('$optest [] := 3', '3');
+  t('join($optest)', '1 2 3');
+  f('optest [] := 3', 'pxp:VAR'); //do not allow relaxed var name
+  t('$optest[1] := 17', '17');
+  t('join($optest)', '17 2 3');
+  t('$optest[2] := 18', '18');
+  t('join($optest)', '17 18 3');
+  t('$optest[6] := 222', '222');
+  t('join($optest)', '17 18 3 222');
+  t('$optest[3] := ()', '');
+  t('join($optest)', '17 18 222');
+  t('$optest[2] := (18, 16)', '18');
+  t('join($optest)', '17 18 16 222');
+  t('$optest[1] := (19, 17)', '19');
+  t('join($optest)', '19 17 18 16 222');
+  t('$optest[1][] := 18.5', '18.5');
+  t('join($optest)', '19 18.5 17 18 16 222');
+  t('$optest[0] := "prepend"', 'prepend');
+  t('join($optest)', 'prepend 19 18.5 17 18 16 222');
+  f('$optest[-1] := "prepend"', 'pxp:VAR');
+
+  t('$optest2[1] := 0', '0');
+  t('join($optest2)', '0');
+  t('$optest2[1] := 3', '3');
+  t('join($optest2)', '3');
+  t('$optest2[0][] := 2', '2');
+  t('join($optest2)', '2 3');
+
+  //():= operator for json arrays + objects
+  t('serialize-json($artest := [])', '[]');
+  t('serialize-json($artest(1) := 100)', '100');
+  t('serialize-json($artest)', '[100]');
+  t('$artest(1) := 111', '111');
+  t('serialize-json($artest)', '[111]');
+  t('$artest(10) := 22', '22');
+  t('serialize-json($artest)', '[111, 22]');
+  t('$artest(10) := 3', '3');
+  t('serialize-json($artest)', '[111, 22, 3]');
+  t('serialize-json(($artest(2) := 8, $artest))', '[8, [111, 8, 3]]');
+  t('serialize-json(($artest(2) := (), $artest))', '[111, 3]');
+  t('serialize-json(($artest(1)[] := 123, $artest))', '[123, [111, 123, 3]]');
+  t('serialize-json(($artest(1) := (), $artest))', '[123, 3]');
+  t('serialize-json(($artest(0) := -1, $artest))', '[-1, [-1, 123, 3]]');
+
+  t('serialize-json($artest := {"a": []})', '{"a": []}');
+  t('serialize-json(($artest("a")(2) := 1, $artest))', '[1, {"a": [1]}]');
+  t('serialize-json(($artest("a")(2) := 22, $artest))', '[22, {"a": [1, 22]}]');
+  t('serialize-json(($artest("a")(3) := 333, $artest))', '[333, {"a": [1, 22, 333]}]');
+  t('serialize-json(($artest("a")(1) := -1, $artest))', '[-1, {"a": [-1, 22, 333]}]');
+  t('serialize-json(($artest("a")(2)[] := 100, $artest))', '[100, {"a": [-1, 22, 100, 333]}]');
+  t('serialize-json((($artest).a(1) := (), $artest))', '{"a": [22, 100, 333]}');
+  t('serialize-json(($artest("a")(2) := (), $artest))', '{"a": [22, 333]}');
+  t('serialize-json(($artest("a")(0) := -2, $artest))', '[-2, {"a": [-2, 22, 333]}]');
+  t('serialize-json(($artest("a")(1)[0] := -10, $artest))', '[-10, {"a": [-10, -2, 22, 333]}]');
+  t('serialize-json(($artest("a")(3)[0] := 11, $artest))', '[11, {"a": [-10, -2, 11, 22, 333]}]');
+
+  t('serialize-json($artest := {"a": [{"b": "1"}, {"c": "2"}]})', '{"a": [{"b": "1"}, {"c": "2"}]}');
+  t('serialize-json((($artest).a(2).c := 222, $artest))', '[222, {"a": [{"b": "1"}, {"c": 222}]}]');
+  t('serialize-json((($artest).a(2).c[] := 3, $artest))', '[3, {"a": [{"b": "1"}, {"c": [222, 3]}]}]');
+  f('($artest).a(2).c(1) := (1, 2)', 'pxp:OBJECT'); //assignment does not work, because it is a sequence, not an array
+  t('serialize-json((($artest).a(2).c[1] := (1, 2), $artest))', '[1, 2, {"a": [{"b": "1"}, {"c": [1, 2, 3]}]}]');
+  t('serialize-json((($artest).a(2).c[1][] := 1.5, $artest))', '[1.5, {"a": [{"b": "1"}, {"c": [1, 1.5, 2, 3]}]}]');
 
   t('{"foo": 123}.foo', '123');
   t('{"foo": 123}.$indirect', '123');
@@ -2254,7 +2353,15 @@ begin
   f('$a.b', 'err:XPST0008');
   t('$a := {"b": 17}', '');
   f('$a.b', 'err:XPST0008');
+  f('$a. b', 'err:XPST0003');
+  t('$a .b', '17');
   t('$a("b")', '17');
+  t('$a."b"', '17');
+  t('$a.''b''', '17');
+  f('$a.("b")', 'err:XPST0008');
+  t('$te.mp := "b"', 'b');
+  t('$a.$te.mp', '17');
+
 
   ps.ParsingOptions.AllowPropertyDotNotation:=xqpdnAllowFullDotNotation;
   t('$a.b', '17');
@@ -2266,6 +2373,52 @@ begin
   t('$obj := {}', '');
   t('$obj("x.y.z") := 17', '17');
   t('$obj("x.y.z")', '17');
+  t('serialize-json($obj)', '{"x.y.z": 17}');
+
+  t('$a / b', '17');
+  t('$a // b', '17');
+  t('[$a] / b', '17');
+  t('[$a] // b', '17');
+  t('($seq := ({"a": 1, "b": 2, "c": 3}, {"b": 4, "c": 5, "d": 6, "e": [{"a": 10, "b": 11}], "f": {"a": 20, "b": 21}}))[2]', '');
+  t('join($seq / a)', '1');
+  t('join($seq / b)', '2 4');
+  t('join([$seq] / b)', '2 4');
+  t('join($seq / (b, c, d))', '2 3 4 5 6');
+  t('join($seq // b)', '2 4 11 21');
+  f('join($seq // (a, b) )','pxp:JSON'); //todo: , '1 2 4 10 11 20 21'); ?
+  t('join($seq / (.//a, .//b) )', '1 2 10 20 4 11 21');
+  t('join( ( $seq // a, $seq // b) )', '1 10 20 2 4 11 21');
+  t('join($seq / . / a )', '1');
+  t('join($seq / . / b )', '2 4');
+  t('join($seq / . / f / a )', '20');
+  t('join($seq / . / f / . / b )', '21');
+  f('join($seq / . / e () / a )', 'err:XPST0017'); //it thinks "e()" is a function
+  t('join($seq / . / e / .() / a )', '10');
+  t('join($seq / . / e / a )', '10');
+  t('join($seq[1] / *)', '1 2 3');
+  f('join($seq[1] / @*)', 'err:XPTY0020');
+  f('join($seq[1] / attribute::*)', 'err:XPTY0020');
+  t('join($seq[2] / *)', '4 5 6  '); //2 space because objects become empty strings
+  t('join($seq / *)', '1 2 3 4 5 6  '); //2 space because objects become empty strings
+
+  t('join($seq[1] // *)', '1 2 3');
+  t('join($seq // *)', '1 2 3 4 5 6   10 11 20 21');
+
+  t('join([{"a": 1}, {"a": 2}, {"a": 3}] / a)', '1 2 3');
+  f('join([{"a": 1}, {"a": 2}, {"a": 3}, 80, 90] / a)', 'pxp:JSON');
+  f('join([{"a": 1}, {"a": 2}, {"a": 3}, [{"a": 4}] ] / a)', 'pxp:JSON');
+  t('join([{"a": 1}, {"a": 2}, {"a": 3}, 80, 90] // a)', '1 2 3');
+
+  t('(obj := {"a": 123}).a', '123');
+  t('join($obj / a)', '123');
+  t('$obj.a := 456', '456');
+  t('join($obj / a)', '456');
+  t('$obj.a := {"b": 7}', '');
+  t('serialize-json($obj / a)', '{"b": 7}');
+  t('serialize-json($obj // b)', '7');
+  t('$obj.a := 8', '8');
+  t('serialize-json($obj / a)', '8');
+  t('serialize-json($obj // b)', 'null');
 
   //Json tests
   t('json(''{"a": 123}'').a', '123');
@@ -2645,7 +2798,7 @@ begin
   t('abs(int("0"))', '0', '');
   t('abs(negativeInteger(-3))', '3', '');
   t('type-of(number(-3))', 'double', '');
-  t('"" / number()', 'NaN', '');
+  t('number("")', 'NaN', '');
   t('number()', '123', '<x>123</x>');
   t('number()', 'NaN', '<x>foo</x>');
   t('fn:number(xs:float("-3.4028235E38")) eq xs:float("-3.4028235E38")', 'true');
@@ -3686,8 +3839,9 @@ begin
   t('outer-html(/)', '<table><TR><TD>1</TD><td>2</td><TD>3</TD></TR></table>', '<table><TR><TD>1<td>2<TD>3</TR></table>');
 
   t('outer-html(/)', '<table><tr><td><br></td><td>'+{firefox: </br>}'</td></tr></table>', '<table><tr><td><br></td><td></br></td></tr></table>');
-  t('outer-html(/)', '<body>some text&lt;http:/some-text&gt; some text</body>','<body>some text <http://some-text> some text</body>'); //this does not make much sense. not removing the last slash from http:// would be better. firefox turns it into an element: <http: some-text=""> some text</http:>
-
+  t('outer-html(/)', '<body>some texta<http: //some-textb="">some textc</http:></body>','<body>some texta <http://some-textb> some textc</body>'); //this does not make much sense. not removing the last slash from http:// would be better. firefox turns it into an element: <http: some-text=""> some text</http:>
+  t('outer-html(/)', '<body><a a="1" /="" b="2"></a><a a="1" /b="2"></a><a a="1" //="" b="2"></a><a a="1" /="" <="" b="2"></a><a a="1" /="">b="2"/&gt;</a></body>', '<body><a a="1" / b="2"/><a a="1" /b="2"/><a a="1" // b="2"/><a a="1" /     < b="2"/><a a="1" /     > b="2"/></body>'); //not exactly what firefox does, but similar enough
+  t('outer-html(/)', '<INPUT TYPE="CHECKBOX" VALUE="item:IN=M02 149 507 0;AT=Luk" janenko,="" Sergej="" V./Der="" falsche="" Spiegel''="" NAME="855439" ID="R855439">', '<INPUT TYPE=CHECKBOX VALUE=''item:IN=M02 149 507 0;AT=Luk''janenko, Sergej V./Der falsche Spiegel'' NAME=''855439'' ID=''R855439''>'); //close enough
 
   xml.repairMissingStartTags:=true;
   t('outer-html(/)', '<html><head></head><body><table></table></body></html>', '<table></table>');
@@ -3753,6 +3907,8 @@ begin
   t('outer-html(/)', '<html><script>ä</script></html>', '<html><script>&auml;</script></html>');
   t('outer-html(/)', '<html><script>&auml;</script></html>', '<html><script><![CDATA[&auml;]]></script></html>');
   t('outer-xml(/)', '<html><script>&amp;auml;</script></html>', '<html><script><![CDATA[&auml;]]></script></html>');
+  t('outer-xml(/)', '<xml>'#10'</xml>', '<xml><![CDATA['#13']]></xml>');
+  t('outer-xml(/)', '<xml>'#10'</xml>', '<xml><![CDATA['#13#10']]></xml>');
 
   t('outer-xml(/)', '<foo xmlns:abc="123" abc:def="456"/>', '<foo abc:def="456" xmlns:abc="123"/>');
 
@@ -3772,6 +3928,11 @@ begin
   t('outer-html(/)', '<html><head></head><body><table><tbody><tr><td>1</td></tr></tbody></table></body></html>', '<table><tr><td>1</td></tr></table>');
   t('outer-html(/)', '<html><head></head><body><table><colgroup><col></colgroup><tbody><tr>17</tr></tbody></table></body></html>' , '<table><col><tr>17</table>');
 
+  t('resolve-html(//a)', 'abc', '<html><head></head><body><a href="abc"/></body></html>');
+  t('resolve-html(//a)', 'http://example.org/abc', '<html><head><base href="http://example.org"/></head><body><a href="abc"/></body></html>');
+  t('resolve-html(//a, "http://foobar.org")', 'http://example.org/def', '<html><head><base target="xx"/><base href="http://example.org"/><base href="http://www.google.de"/></head><body><a href="def"/></body></html>');
+  t('resolve-html(//form, "http://foobar.org").url', 'http://example.org/def?b=a', '<html><head><base target="xx"/><base href="http://example.org"/><base href="http://www.google.de"/></head><body><form action="def"><input value="a" name="b"></body></html>');
+  t('form(//form).url', 'http://example.org/def?b=a');
 
   //error tests
   t('() and true()', 'false');
@@ -3794,6 +3955,9 @@ begin
   f('(xs:string("a"), 1) and true()', 'err:FORG0006');
   f('(0, xs:string("a")) and true()', 'err:FORG0006');
   f('(jn:null(), 8) and true()', 'err:FORG0006');
+  f('form := uri-combine($confirm-form, {"MakeResTypeDef.Reservation.RecipientLocn": $choose-result]})', 'pxp:OBJ');
+  f('},', 'err:XPST0003');
+  f(',,', 'err:XPST0003');
 
 
   //XQuery/XPath 3 syntax tests which must fail in the old version
@@ -3801,6 +3965,13 @@ begin
   f('(1,2) ! 7', 'err:XPST0003');
   f('switch (10) case 10 return "a" case 20 return "b" default return "c"', 'err:XPST0003');
 
+  //interface tests
+  t('. + 1', '2', '<t>1</t>');
+  equal(ps.LastQuery.evaluate(xqvalue(100)).toString, '101', 'evaluate(ixqvalue) failed');
+  equal(ps.evaluateXPath2('"&quot;"').toString, '&quot;', 'evaluateXPath2 failed');
+  equal(ps.evaluateXPath2('2*.', xqvalue(7)).toString, '14', 'evaluateXPath2(ixqvalue) failed');
+  equal(ps.LastQuery.evaluate(xqvalue(100)).toString, '101', 'evaluate(ixqvalue) failed');
+  equal(TXQueryEngine.evaluateStaticXPath2('1 + 1 + 1').toString, '3', 'evaluateStaticXPath2 a failed');
 
   writeln('XPath 2: ', i, ' completed');
 

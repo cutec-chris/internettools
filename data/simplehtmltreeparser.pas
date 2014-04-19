@@ -352,7 +352,6 @@ public
   destructor destroy;override;
   procedure clearTrees;
   //** Creates a new tree from a html document contained in html. @br
-  //** The uri parameter is just stored and returned for you by baseURI, not actually used within this class. @br
   //** contentType is used to detect the encoding
   function parseTree(html: string; uri: string = ''; contentType: string = ''): TTreeDocument; virtual;
   function parseTreeFromFile(filename: string): TTreeDocument; virtual;
@@ -763,10 +762,16 @@ begin
 end;}
 
 procedure TTreeNode.deleteAll();
+var cur: TTreeNode;
+  cnext: TTreeNode;
 begin
-  if next <> nil then next.deleteAll();
-  next:=nil;
-  Free;
+  cur := self;
+  while cur <> nil do begin
+    cnext := cur.next;
+    cur.next := nil;
+    cur.free;
+    cur := cnext;
+  end;
 end;
 
 procedure TTreeNode.changeEncoding(from, toe: TEncoding; substituteEntities: boolean; trimText: boolean);
@@ -1838,6 +1843,8 @@ begin
     for attrib in new.attributes do
       if pos(':', attrib.value) > 0 then
         attrib.namespace := findNamespace(strSplitGet(':', attrib.value));
+    if (FParsingModel = pmHTML) and (striEqual(tag, 'base')) and (FCurrentTree.baseURI = '') and new.hasAttribute('href') then
+      FCurrentTree.baseURI := strResolveURI(new.getAttribute('href'), FCurrentTree.documentURI);
   end;
   if (pos(':', new.value) > 0) then begin
     new.namespace := findNamespace(strSplitGet(':', new.value))
@@ -1846,8 +1853,10 @@ begin
   if new.value = '' then
     if parsingModel = pmStrict then raise ETreeParseException.Create('Invalid node with empty name: '+strFromPchar(tagName, tagNameLen))
     else begin
-      new.value:= '<' +  strFromPchar(tagName, tagNameLen);
-      new.typ :=tetText;
+      new.value:= 'x';// '<' +  strFromPchar(tagName, tagNameLen);
+      //new.typ :=tetText;
+      if pos(':', strFromPchar(tagName, tagNameLen)) > 0 then
+        new.value:=strFromPchar(tagName, tagNameLen);
     end;
 
   new.initialized;

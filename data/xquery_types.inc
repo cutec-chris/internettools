@@ -178,6 +178,11 @@ begin
   result := xqvalue();
 end;
 
+function TXQValue.getPropertyEnumerator: TXQValuePropertyEnumerator;
+begin
+  raise EXQEvaluationException.create('pxp:JSON', 'Attempted to read property of non-object');
+end;
+
 function TXQValue.GetEnumerator: TXQValueEnumerator;
 begin
   result.FCurrent := self;
@@ -1309,6 +1314,79 @@ begin
 end;
 
 
+
+{ TXQProperty }
+
+function TXQProperty.GetName: string;
+begin
+  with enum do
+    result := vars.getName(idx);
+end;
+
+function TXQProperty.GetValue: IXQValue;
+begin
+  with enum do
+    result := vars.get(idx);
+end;
+
+{ TXQValuePropertyEnumerator }
+
+function TXQValuePropertyEnumerator.GetCurrent: TXQProperty;
+begin
+  result := prop;
+end;
+
+function TXQValuePropertyEnumerator.MoveNext: Boolean;
+begin
+  if visitedProperties = nil then begin
+    inc(idx);
+    result := idx < vars.count;
+    exit;
+  end;
+
+  inc(idx);
+  while true do begin
+    while (idx < vars.count) and (visitedProperties.IndexOf(vars.getName(idx)) >= 0) do
+      inc(idx);
+    if idx < vars.count then break;
+    tempobj := tempobj.prototype as TXQValueObject;
+    if tempobj = nil then exit(false);
+    idx := 0;
+    vars := tempobj.values;
+  end;
+//  if tempobj = nil then exit(false);
+  result := true;
+  visitedProperties.Add(vars.getName(idx));
+end;
+
+function TXQValuePropertyEnumerator.GetEnumerator: TXQValuePropertyEnumerator;
+begin
+  result := self;
+end;
+
+constructor TXQValuePropertyEnumerator.create(obj: TXQValueObject);
+begin
+  prop := TXQProperty.Create;
+  prop.enum := self;
+  vars := obj.values;
+  tempobj := obj;
+  if tempobj.prototype <> nil then begin
+    visitedProperties := TStringList.Create; //todo: get a hashmap
+    visitedProperties.Sorted:=true;
+  end;
+  idx := -1;
+end;
+
+destructor TXQValuePropertyEnumerator.destroy;
+begin
+  prop.Free;
+  visitedProperties.Free;
+  inherited destroy;
+end;
+
+
+
+
 { TXQValueObject }
 
 constructor TXQValueObject.create();
@@ -1377,17 +1455,19 @@ end;
 function TXQValueObject.setImmutable(const properties: TStringArray; const v: IXQValue; startIndex: integer = 0): TXQValueObject;
 var
   oldValue: TXQValue;
+  newValue: IXQValue;
 begin
   if startIndex = high(properties) then
     exit(setImmutable(properties[high(properties)], v));
 
-  result := cloneLinked;
-
   if not hasProperty(properties[startIndex], @oldValue) then
     raise EXQEvaluationException.Create('pxp:OBJECT', 'Property '+properties[startIndex]+' not found, when assigning to '+strJoin(properties, '.'));
-  if not (oldValue is TXQValueObject) then raise EXQEvaluationException.Create('pxp:OBJECT', 'Need object property '+properties[startIndex]+' to assign to '+strJoin(properties, '.'));
+  if (oldValue is TXQValueObject) then newValue := TXQValueObject(oldValue).setImmutable(properties, v, startIndex+1)
+  else if (oldValue is TXQValueJSONArray) then newValue := TXQValueJSONArray(oldValue).setImmutable(properties, v, startIndex+1)
+  else raise EXQEvaluationException.Create('pxp:OBJECT', 'Need object or array property '+properties[startIndex]+' to assign to '+strJoin(properties, '.'));
 
-  result.values.add(properties[startIndex], TXQValueObject(oldValue).setImmutable(properties, v, startIndex+1) );
+  result := cloneLinked;
+  result.values.add(properties[startIndex],  newValue);
 end;
 
 procedure TXQValueObject.enumerateKeys(sl: TStringList);
@@ -1396,6 +1476,7 @@ var
   i: Integer;
   oldcount: Integer;
 begin
+  //this does not add keys to sl that are already contained in sl. (so you can combine keys of multiple objects)
   obj := self;
   oldcount := sl.count;
   while obj <> nil do begin
@@ -1404,6 +1485,18 @@ begin
         sl.Insert(oldcount, obj.values.getName(i)); //TODO: optimize
     obj := obj.prototype as TXQValueObject;
   end;
+end;
+
+function TXQValueObject.enumerateValues: IXQValue;
+var
+  prop: TXQProperty;
+  tempSeq: TXQValueSequence;
+begin
+  tempSeq := TXQValueSequence.create(values.count);
+  for prop in getPropertyEnumerator do
+    tempSeq.addChild(prop.Value);
+  result := tempSeq;
+  xqvalueSeqSqueeze(result);
 end;
 
 
@@ -1444,37 +1537,34 @@ end;
 
 function TXQValueObject.jsonSerialize(nodeFormat: TTreeNodeSerialization): string;
 var
-  temp: TXQValueObject;
-  i: Integer;
-  tempi: IXQValue;
+  prop: TXQProperty;
+  first: Boolean;
 begin
   result := '{';
-  tempi := self.clone; //keep reference in scope
-  temp := (tempi as TXQValueObject);
-  if temp.values.count > 0 then begin
-    result += jsonStrEscape(temp.values.getName(0))+': '+temp.values.get(0).jsonSerialize(nodeFormat);
-    for i:=1 to temp.values.count-1 do
-      result += ', '+jsonStrEscape(temp.values.getName(i))+': '+temp.values.get(i).jsonSerialize(nodeFormat);
-  end;
+  first := true;
+  for prop in getPropertyEnumerator do
+    if first then begin
+      result += jsonStrEscape(prop.Name) + ': '+prop.Value.jsonSerialize(nodeFormat);
+      first := false;
+    end else result += ', ' + jsonStrEscape(prop.Name) + ': '+prop.Value.jsonSerialize(nodeFormat);
   result += '}';
 end;
 
 function TXQValueObject.xmlSerialize(nodeFormat: TTreeNodeSerialization; sequenceTag: string; elementTag: string; objectTag: string): string;
 var
-  temp: TXQValueObject;
-  i: Integer;
-  tempi: IXQValue;
+  first: Boolean;
+  prop: TXQProperty;
 begin
-  tempi := self.clone; //keep reference in scope
-  temp := (tempi as TXQValueObject);
-  if temp.values.count = 0 then result := '<'+objectTag+'/>'
-  else begin
-    result :=  '<'+objectTag+'>';
-    result +=  '<'+temp.values.Names[0]+'>'+temp.values.get(0).xmlSerialize(nodeFormat,sequenceTag,elementTag,objectTag)+'</'+temp.values.Names[0]+'>';
-    for i:=1 to temp.values.count-1 do
-      result +=  '<'+temp.values.Names[i]+'>'+temp.values.get(i).xmlSerialize(nodeFormat,sequenceTag,elementTag,objectTag)+'</'+temp.values.Names[i]+'>';
-    result +=  '</'+objectTag+'>';
+  first := true;
+  for prop in getPropertyEnumerator do begin
+    if first then begin
+      result :=  '<'+objectTag+'>';
+      first := false;
+    end;
+    result +=  '<'+prop.name+'>'+prop.Value.xmlSerialize(nodeFormat,sequenceTag,elementTag,objectTag)+'</'+prop.Name+'>';
   end;
+  if first then exit('<'+objectTag+'/>'); //no properties
+  result +=  '</'+objectTag+'>';
 end;
 
 function TXQValueObject.getProperty(const name: string): IXQValue;
@@ -1487,11 +1577,9 @@ begin
   result := temp;
 end;
 
-function TXQValueObject.getEnumeratorOrderedProperties: TXQValueObjectPropertyEnumerator;
+function TXQValueObject.getPropertyEnumerator: TXQValuePropertyEnumerator;
 begin
-  result.tempobj := clone;
-  result.vars := (result.tempobj as TXQValueObject).values;
-  result.idx:=-1;
+  result := TXQValuePropertyEnumerator.Create(self);
 end;
 
 
@@ -1533,6 +1621,36 @@ begin
   for i:=0 to seq.Count-1 do
     seqr.seq.Add(seq[i].clone);
   result := seqr;
+end;
+
+function TXQValueJSONArray.setImmutable(const properties: TStringArray; const v: IXQValue; startIndex: integer): TXQValueJSONArray;
+var
+  oldValue: TXQValue;
+  newValue: IXQValue;
+  i: Integer;
+  idx: Integer;
+begin
+  idx := StrToInt(properties[startIndex]);
+  if idx < 0 then raise EXQEvaluationException.create('pxp:ARRAY', 'Cannot assign to negative array index');
+
+  if (startIndex = high(properties)) then
+    newValue := v
+  else if (idx > seq.Count) then
+    raise EXQEvaluationException.Create('pxp:Array', 'Element index'+properties[startIndex]+' not found, when assigning to '+strJoin(properties, '.'))
+  else if seq[idx-1] is TXQValueObject then
+    newValue := (seq[idx-1] as TXQValueObject).setImmutable(properties, v, startIndex+1)
+  else if seq[idx-1] is TXQValueJSONArray then
+    newValue := (seq[idx-1] as TXQValueJSONArray).setImmutable(properties, v, startIndex+1)
+  else raise EXQEvaluationException.Create('pxp:ARRAY', 'Need array or object '+properties[startIndex]+' to assign to '+strJoin(properties, '.'));
+
+
+  result := TXQValueJSONArray.create(seq.Count);
+  if idx = 0 then result.seq.add(newValue);
+  idx -= 1;
+  for i := 0 to seq.Count - 1 do
+    if i <> idx  then result.seq.add(seq[i])
+    else result.seq.add(newValue);
+  if idx >= seq.Count then result.seq.add(newValue); //e.g. $a(1000) := ..
 end;
 
 function TXQValueJSONArray.jsonSerialize(nodeFormat: TTreeNodeSerialization): string;

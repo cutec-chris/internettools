@@ -68,6 +68,7 @@ type
   TXQuery = class;
   IXQuery = interface;
   TXQNativeModule = class;
+  TXQValuePropertyEnumerator = class;
 
   float = record end;
   xqfloat = double;
@@ -133,6 +134,7 @@ type
     strictTypeChecking: boolean;  //**< Activates strict type checking. If enabled, things like "2" + 3 raise an exception, otherwise it is evaluated to 5. Does not affect *correct* queries (and it makes it slower, so there is no reason to enable this option unless you need compatibility to other interpreters)
     useLocalNamespaces: boolean;  //**< When a statically unknown namespace is encountered in a matching expression it is resolved using the in-scope-namespaces of the possible matching elements
     objectsRestrictedToJSONTypes: boolean; //**< When false, all values can be stored in object properties; when true all property values are JSON values (e.g. sequences become arrays, () becomes null, xml is serialized, ...)
+    jsonPXPExtensions: boolean; //**< Allows further json extensions, going beyond jsoniq (especially child and descendant axis test matching object properties) (for dot operator, see TXQParsingOptions) (default is true)
 
     //ignored
     ordering: boolean;  //**< unused
@@ -242,6 +244,7 @@ type
     function getSequenceCount: integer;  //**< Returns the number of values actually contained in this value (0 for undefined, element count for sequences, and  1 for everything else)
     function getChild(i: integer): IXQValue; //**< Returns the i-th value in this sequence. (non-sequence values are considered to be sequences of length 1) (1-based index)
     function getProperty(const name: string): IXQValue; //**< Returns an object property. Returns empty sequence for non objects.
+    function getPropertyEnumerator: TXQValuePropertyEnumerator; //**< Returns an iterator over all object properties. Raises an exception for non-objects
 
     function debugAsStringWithTypeAnnotation(textOnly: boolean = true): string; //**< Returns the value of this value, annotated with its type (e.g. string: abc)
     function jsonSerialize(nodeFormat: TTreeNodeSerialization): string; //**< Returns a json representation of this value. Converting sequences to arrays and objects to objects
@@ -289,6 +292,7 @@ type
     function getSequenceCount: integer; virtual; //**< Returns the number of values actually contained in this value (0 for undefined, element count for sequences, and  1 for everything else)
     function getChild(i: integer): IXQValue; virtual; //**< Returns the i-th value in this sequence. (non-sequence values are considered to be sequences of length 1)
     function getProperty(const name: string): IXQValue; virtual; //**< Returns an object property. Returns empty sequence for non objects.
+    function getPropertyEnumerator: TXQValuePropertyEnumerator; virtual; //**< Returns an iterator over all object properties. Raises an exception for non-objects
 
     function debugAsStringWithTypeAnnotation(textOnly: boolean = true): string;
     function jsonSerialize(nodeFormat: TTreeNodeSerialization): string; virtual;
@@ -600,26 +604,42 @@ type
     function xmlSerialize(nodeFormat: TTreeNodeSerialization; sequenceTag: string = 'seq'; elementTag: string = 'e'; objectTag: string = 'object'): string; override;
   end;
 
-  { TXQValueNode }
-
-  TXQSimpleVariable = record
-    name: string;
-    value: IXQValue;
-  end;
-
-  { TXQValueObjectPropertyEnumerator }
-
-  TXQValueObjectPropertyEnumerator = record
-  private
-    tempobj: IXQValue;
+  TXQPropertyEnumeratorInternal = class
     vars: TXQVariableChangeLog;
     idx: integer;
-    function GetCurrent: TXQSimpleVariable;
+  end;
+
+  { TXQProperty }
+
+  TXQProperty = class
+  private
+    enum: TXQPropertyEnumeratorInternal;
+    function GetName: string; inline;
+    function GetValue: IXQValue; inline;
+  public
+    property Name: string read GetName;
+    property Value: IXQValue read GetValue;
+  end;
+
+  { TXQValuePropertyEnumerator }
+
+  TXQValueObject = class;
+  TXQValuePropertyEnumerator = class(TXQPropertyEnumeratorInternal)
+  private
+    tempobj: TXQValueObject;
+    prop: TXQProperty;
+    visitedProperties: TStringList;
+    function GetCurrent: TXQProperty;
   public
     function MoveNext: Boolean;
-    property Current: TXQSimpleVariable read GetCurrent;
-    function GetEnumerator: TXQValueObjectPropertyEnumerator;
+    property Current: TXQProperty read GetCurrent;
+
+    function GetEnumerator: TXQValuePropertyEnumerator;
+
+    constructor create(obj: TXQValueObject);
+    destructor destroy; override;
   end;
+
 
   //** Type corresponding to jsoniq json-item()
   TXQValueJSONIQItem = class (TXQValueJSONIQStructuredItem)
@@ -634,7 +654,7 @@ type
   //**that is linked to the previous objects (i.e. has the old object as prototype). @br
   //**(Having the objects immutable, is necessary for the template matcher, so that it can correctly rollback all changes)
   TXQValueObject = class (TXQValueJSONIQItem)
-    values: TXQVariableChangeLog;
+    values: TXQVariableChangeLog; //todo: can there be multiple properties with the same name? some parts assume theq are unique
     prototype: IXQValue;
 
     constructor create(); reintroduce; virtual;
@@ -645,7 +665,8 @@ type
 
     function hasProperty(const name: string; value: PXQValue): boolean; //**< Checks if the object (or its prototype) has a certain property, and returns the property value directly (i.e. changing value^ will change the value stored in the object). @br (You can pass nil for value, if you don't need the value)
     function getProperty(const name: string): IXQValue; override; //**< Returns the value of a property
-    function getEnumeratorOrderedProperties(): TXQValueObjectPropertyEnumerator;
+    function getPropertyEnumerator: TXQValuePropertyEnumerator; override;
+
 
     procedure setMutable(const name: string; const v: IXQValue); //**< Changes a property
     function setImmutable(const name: string; const v: IXQValue): TXQValueObject; //**< Creates a new object with the same values as the current one and changes a property of it
@@ -655,6 +676,7 @@ type
     function setImmutable(const properties: TStringArray; const v: IXQValue; startIndex: integer = 0): TXQValueObject;
 
     procedure enumerateKeys(sl: TStringList);
+    function enumerateValues: IXQValue;
 
     function toBooleanEffective: boolean; override;
 
@@ -668,6 +690,9 @@ type
 
 
   //** Experimental type for a JSON array of other IXQValue
+
+  { TXQValueJSONArray }
+
   TXQValueJSONArray = class (TXQValueJSONIQItem)
     seq: TXQVList;
 
@@ -682,6 +707,8 @@ type
     function toBooleanEffective: boolean; override;
 
     function clone: IXQValue; override;
+
+    function setImmutable(const properties: TStringArray; const v: IXQValue; startIndex: integer = 0): TXQValueJSONArray;
 
     function jsonSerialize(nodeFormat: TTreeNodeSerialization): string; override;
     function xmlSerialize(nodeFormat: TTreeNodeSerialization; sequenceTag: string = 'seq'; elementTag: string = 'e'; objectTag: string = 'object'): string; override;
@@ -1482,6 +1509,7 @@ type
   IXQuery = interface
     function evaluate(const tree: TTreeNode = nil): IXQValue;
     function evaluate(const context: TXQEvaluationContext): IXQValue;
+    function evaluate(const contextItem: IXQValue): IXQValue;
 
     function getTerm: TXQTerm;
     procedure setTerm(aterm: TXQTerm);
@@ -1494,6 +1522,7 @@ type
     constructor Create(asStaticContext: TXQStaticContext; aterm: TXQTerm = nil);
     function evaluate(const tree: TTreeNode = nil): IXQValue;
     function evaluate(const context: TXQEvaluationContext): IXQValue;
+    function evaluate(const contextItem: IXQValue): IXQValue;
 
     destructor Destroy; override;
 
@@ -1624,7 +1653,12 @@ type
 
     @unorderedList(
     @item(@code(x"something{$var}{1+2+3}...") @br If a string is prefixed with an x, all expressions within {..}-parenthesis are evaluated and concattenated to the raw text, similarily to the value of a xquery direct attribute constructor. (option: extended-strings))
-    @item(@code(var:=value) @br This assigns the value @code(value) to the global variable @code(var) and returns @code(value) @br So you can e.g. write @code(((a := 2) + 3)) and get @code(5) and a variable @code(a) with the value @code(2) )
+    @item(@code(var:=value) @br This assigns the value @code(value) to the global variable @code(var) and returns @code(value)
+                            @br So you can e.g. write @code(((a := 2) + 3)) and get @code(5) and a variable @code($a) with the value @code(2)
+                            @br @code($a := 2) is also allowed
+                            @br Can also be used to change object properties, array elements and sequences.
+                                @code($a("property")(1)("foo")[] := 17)) appends 17 to @code({"property": [{"foo": THIS }]}). (but remember that everything is immutable! so it makes a copy (except objects which are shared) )
+                            )
     @item(All string comparisons are case insensitive, and "clever", e.g. @code('9xy' = '9XY' < '10XY' < 'xy'),@br
           unless you use collations.)
     @item(The default type system is weaker typed, most values are automatically converted if necessary, e.g. "1" + 2 returns 3. @br
@@ -1637,12 +1671,13 @@ type
           @br Like a sequence they store a list of values, but they can be nested with each other and within sequences.
           @br
           @br Object can be created with @code({"foobar": 123, "hallo": "world!", ...})
-          @br They stores a set of values as associative map.
-              The values can be accessed similar to a function call, e.g.: @code({"name": value, ...}("name")).
+          @br They store a set of values as associative map.
+              The values can be accessed similar to a function call, e.g.: @code({"name": value, ...}("name")) as documented in the JSONiq extension standard.
           @br This implementation also provides an alternative property syntax, where these properties can be accessed with the usual OOP property dot syntax,
               i.e. @code({"name": 123}.name) will evaluate to @code(123)  (can be changed with the option property-dot-notation).
           @br If an object is assigned to a variable, you can append the dot to the variable name, e.g. @code(let $obj := {"name": 123} return $obj.name).
-              (drawback: variable names are not allowed to contains dots, if this extension is enabled)
+              (drawback: variable names are not allowed to contains dots, if this extension is enabled. If set to "unambiguous", the dot operator can
+              be used in cases where no confusion with variables with dots in their name can occur, e.g. @code(($a).b), @code($a .b) or @code($a."b"). )
           @br Objects are immutable, but the properties of objects that are global variables can seemingly be changed with @code($obj.property := newvalue).
               This creates a new object with name @code($obj) that has all the properties of the old objects plus the changed properties.@br
           @br Objects can be assigned to each other (e.g. @code(obj1 := {}, obj2 := {}, obj2.prop := 123, obj1.sub := obj2 ) ).
@@ -1832,24 +1867,41 @@ type
     //** Parses a new expression and stores it in tokenized form.
     function parseQuery(s:string; model: TXQParsingModel; sharedContext: TXQStaticContext = nil): IXQuery;
 
-    function evaluate(tree:TTreeNode = nil): IXQValue; //**< Evaluates a previously parsed query and returns its value as TXQValue
+    function evaluate(const contextItem: IXQValue): IXQValue; //**< Evaluates a previously parsed query and returns its value as IXQValue
+    function evaluate(tree:TTreeNode = nil): IXQValue; //**< Evaluates a previously parsed query and returns its value as IXQValue
 
     constructor create;
     destructor Destroy; override;
 
+protected
+    function evaluate(expression: string; model: TXQParsingModel; tree:TTreeNode = nil): IXQValue;
+    function evaluate(expression: string; model: TXQParsingModel; const contextItem: IXQValue): IXQValue;
+public
     //** Evaluates an XPath 2.0 expression with a certain tree element as current node.
     function evaluateXPath2(expression: string; tree:TTreeNode = nil): IXQValue;
+    function evaluateXPath2(expression: string; const contextItem: IXQValue): IXQValue;
     //** Evaluates an XQuery 1.0 expression with a certain tree element as current node.
     function evaluateXQuery1(expression: string; tree:TTreeNode = nil): IXQValue;
+    function evaluateXQuery1(expression: string; const contextItem: IXQValue): IXQValue;
     //** Evaluates an XPath 3.0 expression with a certain tree element as current node. Work in progress, only a small set of 3.0 statements is supported
     function evaluateXPath3(expression: string; tree:TTreeNode = nil): IXQValue;
+    function evaluateXPath3(expression: string; const contextItem: IXQValue): IXQValue;
     //** Evaluates an XQuery 3.0 expression with a certain tree element as current node. Work in progress, only a small set of 3.0 statements is supported
     function evaluateXQuery3(expression: string; tree:TTreeNode = nil): IXQValue;
+    function evaluateXQuery3(expression: string; const contextItem: IXQValue): IXQValue;
     //** Evaluates an CSS 3 Selector expression with a certain tree element as current node.
     function evaluateCSS3(expression: string; tree:TTreeNode = nil): IXQValue;
+    function evaluateCSS3(expression: string; const contextItem: IXQValue): IXQValue;
 
     //** Evaluates an expression with a certain tree element as current node.
     class function evaluateStaticXPath2(expression: string; tree:TTreeNode = nil): IXQValue;
+    class function evaluateStaticXPath2(expression: string; const contextItem: IXQValue): IXQValue;
+    class function evaluateStaticXPath3(expression: string; tree:TTreeNode = nil): IXQValue;
+    class function evaluateStaticXPath3(expression: string; const contextItem: IXQValue): IXQValue;
+    class function evaluateStaticXQuery1(expression: string; tree:TTreeNode = nil): IXQValue;
+    class function evaluateStaticXQuery1(expression: string; const contextItem: IXQValue): IXQValue;
+    class function evaluateStaticXQuery3(expression: string; tree:TTreeNode = nil): IXQValue;
+    class function evaluateStaticXQuery3(expression: string; const contextItem: IXQValue): IXQValue;
     //** Evaluates an expression with a certain tree element as current node.
     class function evaluateStaticCSS3(expression: string; tree:TTreeNode = nil): IXQValue;
 
@@ -1875,7 +1927,7 @@ type
   protected
     DefaultParser: TTreeParser; //used by fn:doc if no context node is there
 
-    function parseTerm(str:string; model: TXQParsingModel; context: TXQStaticContext): TXQuery;
+    function parseTerm(str:string; model: TXQParsingModel; context: TXQStaticContext = nil): TXQuery;
     function parseCSSTerm(css:string): TXQTerm;
     function parseXStringNullTerminated(str: string): TXQuery;
 
@@ -1954,7 +2006,7 @@ type
   function xqvalue(v: xqfloat):IXQValue; inline; //**< Creates an BigDecimal IXQValue
   function xqvalue(const v: BigDecimal):IXQValue; inline; //**< Creates an BigDecimal IXQValue
   function xqvalue(v: string):IXQValue; inline; //**< Creates an string IXQValue
-  function xqvalue(intentionallyUnusedParameter: TDateTime):IXQValue; inline; //**< Creates an TDateTime IXQValue
+  function xqvalue(intentionallyUnusedParameter: TDateTime):IXQValue; inline; //**< Raises an exception (to prevent xquery(TDateTime) from using xquery(float))
   function xqvalue(v: TTreeNode):IXQValue; inline; //**< Creates an node TXQValue
   function xqvalue(sl: TStringList): IXQValue; //**< Creates an sequence of strings (does *not* free the list)
 
@@ -2199,7 +2251,6 @@ var
 
 
 
-
 { TXQInterpretedFunctionInfo }
 
 procedure TXQInterpretedFunctionInfo.initialize();
@@ -2306,6 +2357,14 @@ procedure ignore(const intentionallyUnusedParameter: xqfloat); inline; begin end
 procedure ignore(const intentionallyUnusedParameter: bigDecimal); inline; begin end;
 procedure ignore(const intentionallyUnusedParameter: TStringArray); inline; begin end;
 procedure ignore(const intentionallyUnusedParameter: TTreeNodeSerialization); inline; begin end;
+
+function arrayToXQValueArray(a: array of IXQValue): TXQVArray;
+var
+  i: Integer;
+begin
+  setlength(result, length(a));
+  for i := 0 to high(a) do Result[i] := a[i];
+end;
 
 {$I disableRangeOverflowChecks.inc}
 
@@ -2563,26 +2622,6 @@ function xqvalueAtomize(const v: IXQValue): IXQValue; forward;
 
 
 
-{ TXQValueObjectPropertyEnumerator }
-
-function TXQValueObjectPropertyEnumerator.GetCurrent: TXQSimpleVariable;
-begin
-  result.name:=vars.vars[idx].name;
-  result.value:=vars.vars[idx].value;
-end;
-
-function TXQValueObjectPropertyEnumerator.MoveNext: Boolean;
-begin
-  idx += 1;
-  Result := idx < length(vars.vars);
-end;
-
-function TXQValueObjectPropertyEnumerator.GetEnumerator: TXQValueObjectPropertyEnumerator;
-begin
-  result := self;
-end;
-
-
 { TXQStaticContext }
 
 function TXQStaticContext.clone: TXQStaticContext;
@@ -2624,6 +2663,7 @@ begin
   result.strictTypeChecking:=strictTypeChecking;
   Result.useLocalNamespaces:=useLocalNamespaces;
   result.objectsRestrictedToJSONTypes:=objectsRestrictedToJSONTypes;
+  result.jsonPXPExtensions := jsonPXPExtensions;
 end;
 
 destructor TXQStaticContext.Destroy;
@@ -3026,6 +3066,17 @@ begin
       ((staticContext.importedModules.Objects[i] as TXQuery).fterm as TXQTermModule).initializeVariables(tempcontext, (staticContext.importedModules.Objects[i] as TXQuery).staticContext);
   if fterm is TXQTermModule then TXQTermModule(fterm).initializeVariables(tempcontext, staticContext);
   result := fterm.evaluate(tempcontext);
+end;
+
+function TXQuery.evaluate(const contextItem: IXQValue): IXQValue;
+var context: TXQEvaluationContext;
+begin
+  if fterm = nil then exit(xqvalue());
+  context := staticContext.sender.getEvaluationContext(staticContext);
+  context.SeqIndex := 1;
+  context.SeqLength := 1;
+  context.SeqValue := contextItem;
+  result := evaluate(context);
 end;
 
 destructor TXQuery.Destroy;
@@ -3773,6 +3824,7 @@ end;
 procedure TXQVariableChangeLog.addObjectModification(const variable: string; value: IXQValue; const namespace: INamespace; properties: TStringArray);
 var
   oldObj: TXQValue;
+  newValue: IXQValue;
 begin
   if readonly then raise EXQEvaluationException.Create('pxp:INTERNAL', 'Readonly variable changelog modified');
   if length(properties) = 0 then begin
@@ -3782,12 +3834,17 @@ begin
 
   if not hasVariable(variable, @oldObj, namespace) then
     raise EXQEvaluationException.Create('pxp:OBJECT', 'Failed to find object variable '+variable+LineEnding+'(when changing properties: '+strJoin(properties, '.')+')');
-  if not (oldObj is TXQValueObject) then raise EXQEvaluationException.Create('pxp:OBJECT', 'Variable '+variable+' is not an object, but '+oldObj.debugAsStringWithTypeAnnotation()+LineEnding+'(when changing properites: '+strJoin(properties, '.')+')');
+
+
+  if not (oldObj is TXQValueObject) then begin
+    if not (oldObj is TXQValueJSONArray) then raise EXQEvaluationException.Create('pxp:OBJECT', 'Variable '+variable+' is not an object or array, but '+oldObj.debugAsStringWithTypeAnnotation()+LineEnding+'(when changing properites: '+strJoin(properties, '.')+')');
+    newValue := (oldObj as TXQValueJSONArray).setImmutable(properties, value);
+  end else newValue := (oldObj as TXQValueObject).setImmutable(properties, value);
 
   SetLength(vars, length(vars)+1);
   vars[high(vars)].namespace := namespace;
   vars[high(vars)].name:=variable;
-  vars[high(vars)].value:=(oldObj as TXQValueObject).setImmutable(properties, value);
+  vars[high(vars)].value:=newValue;
 
   vars[high(vars)].propertyChange:=true;
 end;
@@ -4273,6 +4330,12 @@ begin
   result := FLastQuery;
 end;
 
+function TXQueryEngine.evaluate(const contextItem: IXQValue): IXQValue;
+begin
+  if FLastQuery = nil then exit(xqvalue())
+  else exit(FLastQuery.evaluate(contextItem));
+end;
+
 function TXQueryEngine.evaluate(tree: TTreeNode): IXQValue;
 begin
   if FLastQuery = nil then exit(xqvalue())
@@ -4315,6 +4378,7 @@ begin
   StaticContext.copyNamespacePreserve:=true;
   StaticContext.stringEncoding:=eUTF8;
   StaticContext.useLocalNamespaces:=true;
+  StaticContext.jsonPXPExtensions:=true;
   FModules := TInterfaceList.Create;
 end;
 
@@ -4339,40 +4403,68 @@ begin
   inherited Destroy;
 end;
 
-function TXQueryEngine.evaluateXPath2(expression: string; tree: TTreeNode): IXQValue;
+function TXQueryEngine.evaluate(expression: string; model: TXQParsingModel; tree: TTreeNode): IXQValue;
 var
-  temp: IXQuery;
+  term: TXQuery;
 begin
-  temp := FLastQuery;
-  result := parseXPath2(expression).evaluate(tree);
-  FLastQuery := temp;
+  term := parseTerm(expression, model);
+  try
+    result := term.evaluate(tree);
+  finally
+    term.free;
+  end;
+end;
+
+function TXQueryEngine.evaluate(expression: string; model: TXQParsingModel; const contextItem: IXQValue): IXQValue;
+var
+  term: TXQuery;
+begin
+  term := parseTerm(expression, model);
+  try
+    result := term.evaluate(contextItem);
+  finally
+    term.free;
+  end;
+end;
+
+function TXQueryEngine.evaluateXPath2(expression: string; tree: TTreeNode): IXQValue;
+begin
+  result := evaluate(expression, xqpmXPath2, tree);
+end;
+
+function TXQueryEngine.evaluateXPath2(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := evaluate(expression, xqpmXPath2, contextItem);
 end;
 
 function TXQueryEngine.evaluateXQuery1(expression: string; tree: TTreeNode): IXQValue;
-var
-  temp: IXQuery;
 begin
-  temp := FLastQuery;
-  result := parseXQuery1(expression).evaluate(tree);
-  FLastQuery := temp;
+  result := evaluate(expression, xqpmXQuery1, tree);
+end;
+
+function TXQueryEngine.evaluateXQuery1(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := evaluate(expression, xqpmXQuery1, contextItem);
 end;
 
 function TXQueryEngine.evaluateXPath3(expression: string; tree: TTreeNode): IXQValue;
-var
-  temp: IXQuery;
 begin
-  temp := FLastQuery;
-  result := parseXPath3(expression).evaluate(tree);
-  FLastQuery := temp;
+  result := evaluate(expression, xqpmXPath3, tree);
+end;
+
+function TXQueryEngine.evaluateXPath3(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := evaluate(expression, xqpmXPath3, contextItem);
 end;
 
 function TXQueryEngine.evaluateXQuery3(expression: string; tree: TTreeNode): IXQValue;
-var
-  temp: IXQuery;
 begin
-  temp := FLastQuery;
-  result := parseXQuery3(expression).evaluate(tree);
-  FLastQuery := temp;
+  result := evaluate(expression, xqpmXQuery3, tree);
+end;
+
+function TXQueryEngine.evaluateXQuery3(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := evaluate(expression, xqpmXQuery3, contextItem);
 end;
 
 function TXQueryEngine.evaluateCSS3(expression: string; tree: TTreeNode): IXQValue;
@@ -4384,15 +4476,83 @@ begin
   FLastQuery := temp;
 end;
 
-class function TXQueryEngine.evaluateStaticXPath2(expression: string; tree: TTreeNode): IXQValue;
+function TXQueryEngine.evaluateCSS3(expression: string; const contextItem: IXQValue): IXQValue;
+var
+  temp: IXQuery;
+begin
+  temp := FLastQuery;
+  result := parseCSS3(expression).evaluate(contextItem);
+  FLastQuery := temp;
+end;
+
+
+function staticallyEval(const expression: string; model: TXQParsingModel; tree: TTreeNode): IXQValue; overload;
 var engine: TXQueryEngine;
+  term: TXQuery;
 begin
   engine := TXQueryEngine.create;
+  term := nil;
   try
-    result := engine.parseXPath2(expression).evaluate(tree);
+    term  := engine.parseTerm(expression, model);
+    result := term.evaluate(tree);
   finally
+    term.free;
     engine.Free;
   end;
+end;
+function staticallyEval(const expression: string; model: TXQParsingModel; const contextItem: IXQValue): IXQValue; overload;
+var engine: TXQueryEngine;
+  term: TXQuery;
+begin
+  engine := TXQueryEngine.create;
+  term := nil;
+  try
+    term := engine.parseTerm(expression, model);
+    result := term.evaluate(contextItem);
+  finally
+    term.free;
+    engine.Free;
+  end;
+end;
+
+class function TXQueryEngine.evaluateStaticXPath2(expression: string; tree: TTreeNode): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXPath2, tree);
+end;
+
+class function TXQueryEngine.evaluateStaticXPath2(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXPath2, contextItem);
+end;
+
+class function TXQueryEngine.evaluateStaticXPath3(expression: string; tree: TTreeNode): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXPath3, tree);
+end;
+
+class function TXQueryEngine.evaluateStaticXPath3(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXPath3, contextItem);
+end;
+
+class function TXQueryEngine.evaluateStaticXQuery1(expression: string; tree: TTreeNode): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXQuery1, tree);
+end;
+
+class function TXQueryEngine.evaluateStaticXQuery1(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXQuery1, contextItem);
+end;
+
+class function TXQueryEngine.evaluateStaticXQuery3(expression: string; tree: TTreeNode): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXQuery3, tree);
+end;
+
+class function TXQueryEngine.evaluateStaticXQuery3(expression: string; const contextItem: IXQValue): IXQValue;
+begin
+  result := staticallyEval(expression, xqpmXQuery3, contextItem);
 end;
 
 class function TXQueryEngine.evaluateStaticCSS3(expression: string; tree: TTreeNode): IXQValue;
@@ -4508,6 +4668,7 @@ begin
     raise;
   end;
 end;
+
 
 
 
@@ -4966,6 +5127,38 @@ class function TXQueryEngine.expandSequence(previous: IXQValue; const command: T
 var oldnode,newnode: TTreeNode;
     newSequence: IXQValue;
     nodeCondition: TXQPathNodeCondition;
+
+procedure jsoniqDescendants(const node: IXQValue; const searchedProperty: string);
+var
+  seq: TXQVList;
+  obj: TXQValueObject;
+  temp: TXQValue;
+  tempprop: TXQProperty;
+  tempvi: IXQValue;
+  i: Integer;
+begin
+  case node.kind of
+    pvkArray: begin
+      seq := (node as TXQValueJSONArray).seq;
+      for i := 0 to seq.Count - 1 do
+        jsoniqDescendants(seq[i], searchedProperty);
+    end;
+    pvkObject: begin
+      obj := (node as TXQValueObject);
+      if searchedProperty <> '' then begin
+        if obj.hasProperty(searchedProperty, @temp) then xqvalueSeqAdd(newSequence, temp);
+      end else xqvalueSeqAdd(newSequence, obj.enumerateValues);
+
+      for tempprop in obj.getPropertyEnumerator do
+        jsoniqDescendants(tempprop.Value, searchedProperty);
+    end;
+    pvkSequence:
+      for tempvi in node do
+        jsoniqDescendants(tempvi, searchedProperty)
+    else ;//we must ignore non structured item, otherwise it would be useless for any object (like a string<->string map) containing them
+  end;
+end;
+
 var
   j: Integer;
   tempContext: TXQEvaluationContext;
@@ -4975,6 +5168,8 @@ var
   resultSeq: TXQValueSequence;
   cachedNamespace: INamespace;
   cachedNamespaceURL: string;
+  tempKind: TXQValueKind;
+  tempProp: TXQValue;
 
   procedure add(const v: IXQValue); inline;
   begin
@@ -4989,73 +5184,129 @@ begin
   if previous.getSequenceCount = 0 then exit(previous);
 
   resultSeq:=TXQValueSequence.create(previous.getSequenceCount);
-
-  if command.typ = qcFunctionSpecialCase then begin
-    tempContext := context;
-    tempContext.SeqLength:=previous.getSequenceCount;
-    tempContext.SeqIndex:=0;
-  end;
-
-  if qmCheckNamespace in command.matching then begin
-    if qmAttribute in command.matching then cachedNamespace := context.findNamespace(command.namespacePrefix, xqdnkUnknown)
-    else cachedNamespace := context.findNamespace(command.namespacePrefix, xqdnkElementType);
-    if cachedNamespace <> nil then cachedNamespaceURL:=cachedNamespace.getURL
-    else if not context.staticContext.useLocalNamespaces then begin
-      if command.namespacePrefix <> '' then raise EXQEvaluationException.Create('XPST0008', 'Unknown namespace prefix: '+command.namespacePrefix+' for element matching');
-      cachedNamespaceURL:='';
-      cachedNamespace := XMLNamespace_XMLSchema; //just assign something, so it is not nil. The value is not used
-    end;
-  end;
-
-  newSequence := nil;
-  nodeCondition.equalFunction:=@context.staticContext.nodeCollation.equal;
-  onlyNodes := false;
-  for n in previous do begin
+  try
     if command.typ = qcFunctionSpecialCase then begin
-      if newSequence is TXQValueSequence then (newSequence as TXQValueSequence).seq.Count:=0
-      else newSequence := nil;
-      tempContext.SeqIndex += 1;
-      tempContext.SeqValue := n;
-      if n is TXQValueNode then tempContext.ParentElement := tempContext.SeqValue.toNode;
-      xqvalueSeqAdd(newSequence, command.specialCase.evaluate(tempContext));
-    end else begin
-      if not (n is TXQValueNode) then continue;
-      assert(n.toNode <> nil);
-      oldnode := n.toNode;
-      unifyQuery(oldnode, command, nodeCondition);
-      if xqpncCheckNamespace in nodeCondition.options then
-        if (cachedNamespace <> nil) then nodeCondition.requiredNamespaceURL:=cachedNamespaceURL
-        else Exclude(nodeCondition.options, xqpncCheckNamespace);
-      newnode := getNextQueriedNode(nil, nodeCondition);
-      if newnode = nil then continue;
-      j:=0;
-      if (newSequence = nil) or not (newSequence is TXQValueSequence) then newSequence := TXQValueSequence.create(0);
-      newSequenceSeq := (newSequence as TXQValueSequence).seq;
-      newSequenceSeq.count := 0;
-      while newnode <> nil do begin
-        if ((qmCheckNamespace in command.matching) = (xqpncCheckNamespace in nodeCondition.options))
-           or (newnode.getNamespacePrefix() = command.namespacePrefix)                            //extension, use namespace bindings of current item, if it is not statically known
-           or (newnode.getNamespaceURL(command.namespacePrefix) = newnode.getNamespaceURL()) then
-        newSequenceSeq.add(xqvalue(newnode));
-        newnode := getNextQueriedNode(newnode, nodeCondition);
-      end;
-      if command.typ = qcPrecedingSibling then
-        newSequenceSeq.revert;
+      tempContext := context;
+      tempContext.SeqLength:=previous.getSequenceCount;
+      tempContext.SeqIndex:=0;
     end;
 
-    filterSequence(newSequence, command.filters, context);
+    if qmCheckNamespace in command.matching then begin
+      if qmAttribute in command.matching then cachedNamespace := context.findNamespace(command.namespacePrefix, xqdnkUnknown)
+      else cachedNamespace := context.findNamespace(command.namespacePrefix, xqdnkElementType);
+      if cachedNamespace <> nil then cachedNamespaceURL:=cachedNamespace.getURL
+      else if not context.staticContext.useLocalNamespaces then begin
+        if command.namespacePrefix <> '' then raise EXQEvaluationException.Create('XPST0008', 'Unknown namespace prefix: '+command.namespacePrefix+' for element matching');
+        cachedNamespaceURL:='';
+        cachedNamespace := XMLNamespace_XMLSchema; //just assign something, so it is not nil. The value is not used
+      end;
+    end;
 
-    if (newSequence = nil) or (newSequence.getSequenceCount = 0) then
-      continue;
+    newSequence := nil;
+    nodeCondition.equalFunction:=@context.staticContext.nodeCollation.equal;
+    onlyNodes := false;
+    for n in previous do begin
+      if command.typ = qcFunctionSpecialCase then begin
+        if not (n.kind in [pvkNode, pvkObject, pvkArray]) then
+          raise EXQEvaluationException.create('err:XPTY0020', 'The / operator can only be applied to xml/json nodes. Got: '+n.debugAsStringWithTypeAnnotation()); //continue;
+        if newSequence is TXQValueSequence then (newSequence as TXQValueSequence).seq.Count:=0
+        else newSequence := nil;
+        tempContext.SeqIndex += 1;
+        tempContext.SeqValue := n;
+        if n is TXQValueNode then tempContext.ParentElement := tempContext.SeqValue.toNode;
+        xqvalueSeqAdd(newSequence, command.specialCase.evaluate(tempContext));
+      end else begin
+        tempKind := n.kind;
+        case tempKind of
+          pvkNode: begin
+            assert(n.toNode <> nil);
+            oldnode := n.toNode;
+            unifyQuery(oldnode, command, nodeCondition);
+            if xqpncCheckNamespace in nodeCondition.options then
+              if (cachedNamespace <> nil) then nodeCondition.requiredNamespaceURL:=cachedNamespaceURL
+              else Exclude(nodeCondition.options, xqpncCheckNamespace);
+            newnode := getNextQueriedNode(nil, nodeCondition);
+            if newnode = nil then continue;
+            j:=0;
+            if (newSequence = nil) or not (newSequence is TXQValueSequence) then newSequence := TXQValueSequence.create(0);
+            newSequenceSeq := (newSequence as TXQValueSequence).seq;
+            newSequenceSeq.count := 0;
+            while newnode <> nil do begin
+              if ((qmCheckNamespace in command.matching) = (xqpncCheckNamespace in nodeCondition.options))
+                 or (newnode.getNamespacePrefix() = command.namespacePrefix)                            //extension, use namespace bindings of current item, if it is not statically known
+                 or (newnode.getNamespaceURL(command.namespacePrefix) = newnode.getNamespaceURL()) then
+              newSequenceSeq.add(xqvalue(newnode));
+              newnode := getNextQueriedNode(newnode, nodeCondition);
+            end;
+            if command.typ = qcPrecedingSibling then
+              newSequenceSeq.revert;
+          end;
+          pvkObject, pvkArray: begin
+            if not context.staticContext.jsonPXPExtensions then raise EXQEvaluationException.create('pxp:JSON', 'PXP Json extensions are disabled');
+            if (command.namespacePrefix <> '') or (command.requiredType <> nil)
+               or not (command.typ in [qcDirectChild, qcDescendant, qcSameNode])
+               or ((command.typ <> qcSameNode) and (command.matching - [qmCheckNamespace, qmCheckOnSingleChild, qmValue, qmAttribute] <> [qmElement]))
+               or ((command.typ = qcSameNode) and ((command.matching <> [qmElement, qmText, qmComment, qmProcessingInstruction, qmAttribute, qmDocument]) or (command.value <> '') ))
+               then
+                 raise EXQEvaluationException.create('pxp:JSON', 'too complex query for JSON object');
+            if newSequence is TXQValueSequence then (newSequence as TXQValueSequence).seq.Count:=0
+            else newSequence := nil;
+            case command.typ of
+              qcDirectChild: begin
+                if qmValue in command.matching then begin //read named property
+                  //if tempKind <> pvkObject then raise EXQEvaluationException.create('err:XPTY0020', 'Only nodes (or objects if resp. json extension is active) can be used in path expressions');
+                  if tempKind = pvkObject then begin
+                    if (n as TXQValueObject).hasProperty(command.value, @tempProp) then
+                      xqvalueSeqAdd(newSequence, tempProp);
+                  end else begin
+                    newSequenceSeq := (n as TXQValueJSONArray).seq;
+                    for j := 0 to newSequenceSeq.Count - 1 do
+                      if not (newSequenceSeq[j] is TXQValueObject) then
+                        raise EXQEvaluationException.create('pxp:JSON', 'The / operator can only be applied to xml nodes, json objects and jsson arrays of only objects. Got array containing "'+newSequenceSeq[j].debugAsStringWithTypeAnnotation()+'"')
+                      else if (newSequenceSeq[j] as TXQValueObject).hasProperty(command.value, @tempProp) then
+                        xqvalueSeqAdd(newSequence, tempProp);
+                  end;
+                end else begin
+                  //get all properties
+                  if tempKind = pvkObject then xqvalueSeqAdd(newSequence, (n as TXQValueObject).enumerateValues())
+                  else begin
+                    newSequenceSeq := (n as TXQValueJSONArray).seq;
+                    for j := 0 to newSequenceSeq.Count - 1 do
+                      if not (newSequenceSeq[j] is TXQValueObject) then
+                        raise EXQEvaluationException.create('pxp:JSON', 'The /* operator can only be applied to xml nodes, json objects and jsson arrays of only objects. Got array containing "'+newSequenceSeq[j].debugAsStringWithTypeAnnotation()+'"')
+                      else xqvalueSeqAdd(newSequence, (newSequenceSeq[j] as TXQValueObject).enumerateValues());
+                  end;
+                end;
+              end;
+              qcDescendant:
+                jsoniqDescendants(n as TXQValue, command.value);
+              qcSameNode:
+                newSequence := n;
+            end;
 
-    if newSequence is TXQValueSequence then begin
-      newSequenceSeq := (newSequence as TXQValueSequence).seq;
-      if (command.typ in [qcAncestor,qcSameOrAncestor,qcPreceding,qcPrecedingSibling]) then
-        newSequenceSeq.revert;
+          end;
+          else raise EXQEvaluationException.create('err:XPTY0020', 'The / operator can only be applied to xml/json nodes. Got: '+n.debugAsStringWithTypeAnnotation()); //continue;
+        end;
+      end;
 
-      for j := 0 to newSequenceSeq.Count-1 do
-        add(newSequenceSeq[j]);
-    end else add(newSequence);
+      filterSequence(newSequence, command.filters, context);
+
+      if (newSequence = nil) or (newSequence.getSequenceCount = 0) then
+        continue;
+
+      if newSequence is TXQValueSequence then begin
+        newSequenceSeq := (newSequence as TXQValueSequence).seq;
+        if (command.typ in [qcAncestor,qcSameOrAncestor,qcPreceding,qcPrecedingSibling]) then
+          newSequenceSeq.revert;
+
+        for j := 0 to newSequenceSeq.Count-1 do
+          add(newSequenceSeq[j]);
+      end else add(newSequence);
+    end;
+
+  except
+    resultSeq.free;
+    raise;
   end;
 
   result := resultSeq;
@@ -5073,7 +5324,7 @@ begin
       filterSequence(result, query.filters, context);
     end
     else begin
-      if (context.SeqValue <> nil) and (context.SeqValue is TXQValueNode) then result := context.SeqValue
+      if (context.SeqValue <> nil) and (context.SeqValue.kind in [pvkNode, pvkObject]) then result := context.SeqValue
       else if context.ParentElement <> nil then result := xqvalue(context.ParentElement)
       else if context.staticContext.sender.ParentElement <> nil then result := xqvalue(context.staticContext.sender.ParentElement)
       else if context.SeqValue = nil then raise EXQEvaluationException.create('XPDY0002', 'Context item is undefined')
@@ -5614,6 +5865,7 @@ pxp.registerFunction('inner-xml',@xqFunctionInner_XML, []);
 pxp.registerFunction('outer-html',@xqFunctionOuter_HTML, []);
 pxp.registerFunction('inner-html',@xqFunctionInner_HTML, []);
 pxp.registerFunction('form',@xqFunctionForm, []);
+pxp.registerFunction('resolve-html',@xqFunctionResolve_Html, []);
 pxp.registerFunction('eval',@xqFunctionEval, []);
 pxp.registerFunction('css',@xqFunctionCSS, []);
 pxp.registerFunction('get',@xqFunctionGet, ['($name as xs:string)','($name as xs:string, $def as item()*)'], [xqcdContextVariables]);

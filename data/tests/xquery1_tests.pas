@@ -26,6 +26,12 @@ type
   procedure ImportModule(sender: TObject; const namespace: string; const at: array of string);
 end;
 
+procedure equal(const s1, s2, testname: string);
+begin
+  if s1 <> s2 then raise exception.Create(s1 + ' <> ' + s2 + ' ('+testname+')');
+end;
+
+
 procedure unittests(testerrors: boolean);
 var
   count: integer;
@@ -1605,6 +1611,8 @@ begin
   t('let $obj := {"hallo": 123, "foobar": 456, "xyz": 789} return $obj.foobar + $obj.hallo + $obj.xyz', '1368');
   t('for $obj in ({"a": 123}, {"a": 1000}, {}, {"a": 10000}) return $obj.a', '123 1000 10000');
   t('let $obj := {"nest": {"ing": "birdy"}} return $obj.nest.ing', 'birdy');
+  t('let $obj := {"nest": {"ing": "birdy"}} return $obj/nest/ing', 'birdy');
+  f('declare option pxp:extended-json "off"; let $obj := {"nest": {"ing": "birdy"}} return $obj/nest/ing', 'pxp:JSON');
 
   m('declare namespace p="http://www.w3.org/2001/XMLSchema"; p:integer(1)', '1');
   m('<x xmlns:p="http://www.w3.org/2005/xpath-functions">{p:concat(1,2,3)}</x>', '123');
@@ -1790,6 +1798,15 @@ begin
 
   jsoniqlibtests('pseudo://libjn-test-module');
 
+  t('resolve-html(("a", 123, <a href="foobar">xyz</a>, <a href="http://google.de">xyz</a>, <unk href="a">b</unk>))', 'a 123 foobar http://google.de b');
+  t('resolve-html(("a", 123, <a href="foobar">xyz</a>, <a href="http://google.de">xyz</a>, <unk href="a">b</unk>), "http://example.org")', 'http://example.org/a http://example.org/123 http://example.org/foobar http://google.de http://example.org/b');
+  t('serialize-json(resolve-html((<frame src="x"/>, <iframe src="y"/>, <img src="z"/>, <form action="f"><input name="inp" value="v"/></form>), "http://example.org"))', '["http://example.org/x", "http://example.org/y", "http://example.org/z", {"method": "GET", "url": "pseudo://test/f?inp=v"}]' {good idea to keep url from form?});
+  t('serialize-json(resolve-html({"url": "b", "foo": "bar"}, "http://example.org"))', '{"url": "http://example.org/b", "foo": "bar"}');
+  t('serialize-json(resolve-html(({ "foo": "bar"}, {"x": 1}), "http://example.org"))', '[{"foo": "bar"}, {"x": 1}]');
+  t('resolve-html((<video src="abc"/>, <area href="def"/>, <track href="def" src="ghi"/>, <script src="jkl"/>, <link href="mno"/>), "http://example.org")', 'http://example.org/abc http://example.org/def http://example.org/ghi http://example.org/jkl http://example.org/mno');
+  t('resolve-html((<meta http-equiv="refresh" content="1"/>, <meta http-equiv="refresh" content="ab"/>, <meta http-equiv="refresh" content="1; url=cd"/>, <meta http-equiv="refresh" content="  url=ef  "/>), "http://example.org/atom/")', 'http://example.org/atom/ http://example.org/atom/ab http://example.org/atom/cd http://example.org/atom/ef');
+  t('resolve-html((<a href="abc"/>, <a href="def"/> / @href, attribute src {"ghi"}), "http://example.org/atom/")', 'http://example.org/atom/abc http://example.org/atom/def http://example.org/atom/ghi');
+
 
   m('declare function members2($x) { typeswitch ($x) case array() return jn:members($x) default return $x }; string-join(members2([1,2,3]), " ")', '1 2 3');
   m('declare function members2($x) { typeswitch ($x) case array() return jn:members($x) default return $x }; string-join(members2((1,2,3)), " ")', '1 2 3');
@@ -1815,6 +1832,14 @@ begin
   //XQuery/XPath 3 syntax tests which must fail in the old version
   f('"a" || "b"', 'err:XPST0003');
   f('switch (10) case 10 return "a" case 20 return "b" default return "c"', 'err:XPST0003');
+
+  //interface tests
+  t('. + <x>1</x>', '2', '<t>1</t>');
+  equal(ps.LastQuery.evaluate(xqvalue(100)).toString, '101', 'evaluate(ixqvalue) failed');
+  equal(ps.evaluateXQuery1('"&quot;"').toString, '"', 'evaluateXQuery1 failed');
+  equal(ps.evaluateXQuery1('<a>2</a>*.', xqvalue(7)).toString, '14', 'evaluateXQuery1(ixqvalue) failed');
+  equal(ps.LastQuery.evaluate(xqvalue(100)).toString, '101', 'evaluate(ixqvalue) failed');
+  equal(TXQueryEngine.evaluateStaticXQuery1('<a>1</a> + 1 + 1').toString, '3', 'evaluateStaticXQuery1 a failed');
 
   writeln('XQuery: ', count, ' completed');
 

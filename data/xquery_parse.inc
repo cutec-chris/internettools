@@ -815,6 +815,7 @@ var
   propertyAccess: Boolean;
 begin
   result := TXQTermVariable.Create(nextTokenQName(), staticContext);
+  operatorMode := false;
   if (options.AllowPropertyDotNotation = xqpdnAllowFullDotNotation) and strContains(TXQTermVariable(result).value, '.') then begin
     propertyAccess := true;
     operatorMode := strEndsWith(TXQTermVariable(result).value, '.');
@@ -824,12 +825,17 @@ begin
     end;
     if propertyAccess then
       result := TXQTermVariable.splitForDotNotation(TXQTermVariable(result));
-    if operatorMode then begin
-      result := TXQTermDynamicFunctionCall.create(result, parseValue());
-      if result.children[1] is TXQTermNodeMatcher then begin
-        result.free;
-        raiseParsingError('pxp:XPST0003', 'A node matching step is not allowed directly after a property dot operator');
-      end;
+  end else if (options.AllowPropertyDotNotation = xqpdnAllowUnambiguousDotNotation) and strEndsWith(TXQTermVariable(result).value, '.') then begin
+    skipWhitespaceAndComment();
+    operatorMode := pos^ in ['"', '''', '$'];
+    if operatorMode then
+      delete(TXQTermVariable(result).value, length(TXQTermVariable(result).value), 1);
+  end;
+  if operatorMode then begin
+    result := TXQTermDynamicFunctionCall.create(result, parseValue());
+    if result.children[1] is TXQTermNodeMatcher then begin
+      result.free;
+      raiseParsingError('pxp:XPST0003', 'A node matching step is not allowed directly after a property dot operator');
     end;
   end;
 end;
@@ -1208,6 +1214,8 @@ begin
         raiseParsingError('XPST0075', 'Schema validation is not supported');
       end;
 
+      if (word = '') or (word[1] in [',', ';', ':', ')', ']', '}']) then //todo: check if valid xml node name
+        raiseParsingError('XPST0003', 'Unexpected character: ' + word);
       result := TXQTermNodeMatcher.Create(word);
     except
       result.free;
@@ -1312,8 +1320,10 @@ begin
           exit(astroot);
         '[': begin
           expect('[');
+          skipWhitespaceAndComment();
           replace := ripBinOpApart(@astroot, 10000);
-          replace^ := TXQTermFilterSequence.Create(replace^, parse());
+          if pos^ <> ']' then replace^ := TXQTermFilterSequence.Create(replace^, parse())
+          else                replace^ := TXQTermFilterSequence.Create(replace^); //stupid hack to allow $var [] :=
           expect(']');
         end;
         '(': begin
@@ -1330,11 +1340,12 @@ begin
           result := astroot;
           if result is TXQTermNodeMatcher then begin
             result := TXQTermVariable.create(IfThen(TXQTermNodeMatcher(astroot).namespace = '', TXQTermNodeMatcher(astroot).select, TXQTermNodeMatcher(astroot).namespace + ':' + TXQTermNodeMatcher(astroot).select), staticContext);
-            astroot.free;
-            if (options.AllowPropertyDotNotation = xqpdnAllowFullDotNotation) and (strContains(TXQTermVariable(result).value, '.')) then
-              result := TXQTermVariable.splitForDotNotation(TXQTermVariable(result));
+            FreeAndNil(astroot);
+            astroot := result; //only astroot should contain allocated objects that need to be freed in case of a subsequent parsing error
+            if (options.AllowPropertyDotNotation = xqpdnAllowFullDotNotation) and (strContains(TXQTermVariable(astroot).value, '.')) then
+              astroot := TXQTermVariable.splitForDotNotation(TXQTermVariable(astroot));
           end;
-          result := TXQTermDefineVariable.Create(result, parseSomething());
+          result := TXQTermDefineVariable.Create(astroot, parseSomething());
           //staticContext.splitRawQName(TXQTermDefineVariable(result).namespace, TXQTermDefineVariable(result).variablename, xqdnkUnknown);
           exit;
         end;
@@ -1698,6 +1709,7 @@ begin
                 'strict-type-checking': readBoolean(staticContext.strictTypeChecking, temp);
                 'use-local-namespaces': readBoolean(staticContext.useLocalNamespaces, temp);
                 'pure-json-objects': readBoolean(staticContext.objectsRestrictedToJSONTypes, temp);
+                'extended-json': readBoolean(staticContext.jsonPXPExtensions, temp);
                 'string-entities':
                   case temp of
                     'off': options.StringEntities:=xqseIgnoreLikeXPath;

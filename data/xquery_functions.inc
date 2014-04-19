@@ -1459,6 +1459,107 @@ begin
   result := (args[0] as TXQValueObject).setImmutable(propName, xqFunctionUri_combine(context, temp));
 end;
 
+function xqFunctionResolve_Html(const context: TXQEvaluationContext; const args: TXQVArray): IXQValue;
+var res: IXQValue;
+    baseUri: String;
+
+  procedure addString(const s: string);
+  begin
+    xqvalueSeqAdd(res, xqvalue(strResolveURI(s, baseUri)));
+  end;
+
+  procedure resolve(const seq: IXQValue);
+  var iv: IXQValue;
+    n: TTreeNode;
+    tempv: IXQValue;
+    resolvedUri: RawByteString;
+    tempobj: TXQValueObject;
+  begin
+    for iv in seq do
+      case iv.kind of
+        pvkUndefined: ;
+        pvkNode: begin
+          n := iv.toNode;
+          if n = nil then continue;
+          if n.typ <> tetOpen then addString(iv.toString())
+          else case LowerCase(n.value) of
+            'a', 'area', 'link':
+               addString(n['href']);
+            'frame', 'iframe', 'img',
+            'video', 'audio', 'source', 'track',
+            'embed':
+               addString(n['src']);
+            'script': if n.hasAttribute('src') then
+               addString(n['src'])
+             else
+               addString(n.deepNodeText());
+            'meta': if SameText(n['http-equiv'], 'refresh') then begin
+              resolvedUri := trim(n['content']);
+              if strIndexOf(resolvedUri, ';') > 0 then
+                resolvedUri := trim(strCopyFrom(resolvedUri,  strIndexOf(resolvedUri, ';') + 1))
+               else begin
+                 while (resolvedUri <> '') and (resolvedUri[1] in ['0'..'9']) do delete(resolvedUri, 1, 1);
+                 resolvedUri := trim(resolvedUri);
+               end;
+              if striBeginsWith(resolvedUri, 'url=') then
+                resolvedUri := trim(strCopyFrom(resolvedUri, 5));
+              addString(resolvedUri);
+            end else
+              addString(n.deepNodeText()); //pointless fallback
+            'object':
+              addString(n['data']);
+            'form':
+              resolve(xqFunctionForm(context, arrayToXQValueArray([iv])))
+            else addString(n.deepNodeText());
+          end;
+        end;
+        pvkObject: begin
+          tempv := iv.getProperty('url');
+          if not tempv.isUndefined then begin
+            resolvedUri := strResolveURI(tempv.toString, baseUri);
+            if resolvedUri <> tempv.toString then begin
+              tempobj := TXQValueObject.create();
+              tempobj.prototype := iv;
+              tempobj.values.add('url', resolvedUri);
+              xqvalueSeqAdd(res, tempobj);
+            end else xqvalueSeqAdd(res, iv);
+          end else xqvalueSeqAdd(res, iv);
+        end;
+        else addString(iv.toString);
+      end;
+
+  end;
+
+var
+  n: TTreeNode;
+  tempv: IXQValue;
+begin
+  requiredArgCount(args, 1, 2);
+
+  baseUri := '';
+  for tempv in args[0] do
+    if (tempv.kind = pvkNode) and (tempv.toNode <> nil) and (tempv.toNode.hasDocument()) then begin
+      baseUri := tempv.toNode.getDocument().baseURI;
+      break;
+    end;
+
+  if (length(args) > 1) and (baseUri = '') then begin //use 2nd parameter only as fallback uri, if 1st parameter does not have one. (it would be nicer to have a way to override the url, but checking if there is a url, is too much caller overhead)
+    tempv := args[1].getChild(1);
+    case tempv.kind of
+      pvkNode: begin
+        n := tempv.toNode;
+        if n <> nil then baseUri := n.getDocument().baseURI;
+      end;
+      else baseUri := tempv.toString;
+    end;
+  end;
+
+  res := nil;
+  resolve(args[0]);
+  result := res;
+  if res = nil then exit(xqvalue);
+end;
+
 function xqFunctionCodepoints_to_string(const args: TXQVArray): IXQValue;
 var temp: string;
  v: IXQValue;
